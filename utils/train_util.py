@@ -95,7 +95,7 @@ class TrainLoop:
             ]
 
 
-        if th.cuda.is_available():
+        if dist.get_world_size() > 1:
             self.use_ddp = True
             if self.classifier_free:
                 find_unused_parameters = True
@@ -103,18 +103,13 @@ class TrainLoop:
                 find_unused_parameters = False
             self.ddp_model = DDP(
                 self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
+                device_ids=[dist_util.dev()] if th.cuda.is_available() else None,
+                output_device=dist_util.dev() if th.cuda.is_available() else None,
                 broadcast_buffers=False,
                 bucket_cap_mb=128,
                 find_unused_parameters=find_unused_parameters,
             )
         else:
-            if dist.get_world_size() > 1:
-                logger.warn(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
             self.use_ddp = False
             self.ddp_model = self.model
 
@@ -218,7 +213,8 @@ class TrainLoop:
                 for k, v in cond.items()
             }
             micro_sty = sty_batch[i: i + self.microbatch].to(dist_util.dev())
-            micro_cond['sty'] = self.ddp_model.module.sty_encoder(micro_sty.clone().detach())
+            with th.no_grad():
+                micro_cond['sty'] = self.model.sty_encoder(micro_sty)
 
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())

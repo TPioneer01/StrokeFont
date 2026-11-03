@@ -1,4 +1,5 @@
 import argparse
+import os
 from utils import dist_util, logger
 from utils.image_datasets import load_data
 from utils.resample import create_named_schedule_sampler
@@ -33,8 +34,7 @@ def main():
 
     model_save_dir = cfg.model_save_dir  
 
-    if not os.path.exists(model_save_dir):
-        os.mkdir(model_save_dir)
+    os.makedirs(model_save_dir, exist_ok=True)
 
     logger.configure(dir=model_save_dir, format_strs=['stdout', 'log', 'csv']) 
 
@@ -118,5 +118,4 @@ def create_cfg(cfg):
 
 
 if __name__ == "__main__":
-    import os
     main()

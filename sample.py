@@ -25,6 +25,7 @@ def img_pre_pros(img_path, image_size):
     return np.transpose(arr, [2, 0, 1])
 
 
+@th.no_grad()
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cfg_path', type=str, default='./cfg/test_cfg.yaml',
@@ -52,8 +53,7 @@ def main():
 
     dist_util.setup_dist()
 
-    if not os.path.exists(img_save_path):
-        os.mkdir(img_save_path)
+    os.makedirs(img_save_path, exist_ok=True)
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -72,34 +72,43 @@ def main():
 
     # gen txt
     char2idx = {}
-    with open(total_txt_file, 'r') as f:
-        chars = f.readlines()
-        for idx, char in enumerate(chars[0]):
+    with open(total_txt_file, 'r', encoding='utf-8-sig') as f:
+        chars = ''.join(f.read().split())
+        for idx, char in enumerate(chars):
             char2idx[char] = idx
         f.close()
     char_idx = []
-    with open(gen_txt_file, 'r') as f1:
-        genchars = f1.readlines()
-        for char in genchars[0]:
+    with open(gen_txt_file, 'r', encoding='utf-8-sig') as f1:
+        genchars = ''.join(f1.read().split())
+        for char in genchars:
             char_idx.append(char2idx[char])
         f1.close()
+
+    if cfg.batch_size <= 0 or cfg.num_samples <= 0:
+        raise ValueError("batch_size and num_samples must be positive.")
+    if cfg.num_samples > len(char_idx):
+        raise ValueError("num_samples cannot exceed the number of characters in gen_txt_file.")
+    char_idx = char_idx[:cfg.num_samples]
+    global_batch_size = cfg.batch_size * dist.get_world_size()
+    # Pad the final round so collective operations have equal tensor shapes.
+    char_idx += [char_idx[-1]] * (-len(char_idx) % global_batch_size)
 
     all_images = []
     all_labels = []
 
-    ch_idx = 0
+    ch_idx = dist.get_rank() * cfg.batch_size
     while len(all_images) * cfg.batch_size < cfg.num_samples:
         model_kwargs = {}
         classes = th.tensor([i for i in char_idx[ch_idx:ch_idx + cfg.batch_size]], device=dist_util.dev())
-        ch_idx += cfg.batch_size
+        ch_idx += global_batch_size
 
         model_kwargs["y"] = classes
-        img = th.tensor(img_pre_pros(sty_img_path, cfg.image_size), requires_grad=False).cuda().repeat(cfg.batch_size, 1, 1, 1)
+        img = th.tensor(img_pre_pros(sty_img_path, cfg.image_size), device=dist_util.dev()).repeat(cfg.batch_size, 1, 1, 1)
         sty_feat = model.sty_encoder(img)
         model_kwargs["sty"] = sty_feat
         if cfg.stroke_path is not None:
             chars_stroke = th.empty([0, 32], dtype=th.float32)
-            with open(cfg.stroke_path, 'r') as f:
+            with open(cfg.stroke_path, 'r', encoding='utf-8-sig') as f:
                 lines = f.readlines()
                 for line in lines:
                     strokes = line.split(" ")[1:-1]
@@ -111,7 +120,7 @@ def main():
                     assert len(char_stroke) == 32
                     chars_stroke = th.cat((chars_stroke, th.tensor(char_stroke).reshape([1, 32])), dim=0)
             f.close()
-            model_kwargs["stroke"] = chars_stroke[classes].to(dist_util.dev())
+            model_kwargs["stroke"] = chars_stroke.to(dist_util.dev())[classes]
         if classifier_free:
             if cfg.stroke_path is not None:
                 model_kwargs["mask_y"] = th.cat([th.zeros([cfg.batch_size], dtype=th.bool), th.ones([cfg.batch_size * 2], dtype=th.bool)]).to(dist_util.dev())
@@ -169,7 +178,7 @@ def main():
         sample = sample.contiguous()
 
         gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        dist.all_gather(gathered_samples, sample)
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
 
         gathered_labels = [

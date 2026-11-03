@@ -3,7 +3,7 @@ import random
 
 from PIL import Image
 import blobfile as bf
-from mpi4py import MPI
+import torch.distributed as dist
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from . import logger
@@ -36,7 +36,7 @@ def load_data(
         logger.log('=' * 20)
 
         chars_stroke = np.empty([0, 32], dtype=np.float32)
-        with open(stroke_path, 'r') as f:
+        with open(stroke_path, 'r', encoding='utf-8-sig') as f:
             lines = f.readlines()
             for line in lines:
                 strokes = line.split(" ")[1:-1]
@@ -54,8 +54,8 @@ def load_data(
             all_files,
             classes=classes,
             sty_classes=sty_classes,
-            shard=MPI.COMM_WORLD.Get_rank(),
-            num_shards=MPI.COMM_WORLD.Get_size(),
+            shard=dist.get_rank() if dist.is_initialized() else 0,
+            num_shards=dist.get_world_size() if dist.is_initialized() else 1,
             random_crop=random_crop,
             random_flip=random_flip,
             chars_stroke=chars_stroke,
@@ -66,12 +66,14 @@ def load_data(
             all_files,
             classes=classes,
             sty_classes=sty_classes,
-            shard=MPI.COMM_WORLD.Get_rank(),
-            num_shards=MPI.COMM_WORLD.Get_size(),
+            shard=dist.get_rank() if dist.is_initialized() else 0,
+            num_shards=dist.get_world_size() if dist.is_initialized() else 1,
             random_crop=random_crop,
             random_flip=random_flip,
             chars_stroke=chars_stroke,
         )
+    if len(dataset) < batch_size:
+        raise ValueError("Each process needs at least batch_size images; reduce batch_size or process count.")
     if deterministic:
         loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=False, num_workers=1, drop_last=True

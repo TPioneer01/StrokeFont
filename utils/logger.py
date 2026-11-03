@@ -10,7 +10,6 @@ import json
 import time
 import datetime
 import tempfile
-import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 
@@ -257,10 +256,6 @@ def set_level(level):
     get_current().set_level(level)
 
 
-def set_comm(comm):
-    get_current().set_comm(comm)
-
-
 def get_dir():
 
     return get_current().get_dir()
@@ -309,13 +304,12 @@ class Logger(object):
     # So that you can still log to the terminal without setting up any output files
     CURRENT = None  # Current logger being used by the free functions above
 
-    def __init__(self, dir, output_formats, comm=None):
+    def __init__(self, dir, output_formats):
         self.name2val = defaultdict(float)  # values this iteration
         self.name2cnt = defaultdict(int)
         self.level = INFO
         self.dir = dir
         self.output_formats = output_formats
-        self.comm = comm
 
     # Logging API, forwarded
     # ----------------------------------------
@@ -328,18 +322,7 @@ class Logger(object):
         self.name2cnt[key] = cnt + 1
 
     def dumpkvs(self):
-        if self.comm is None:
-            d = self.name2val
-        else:
-            d = mpi_weighted_mean(
-                self.comm,
-                {
-                    name: (val, self.name2cnt.get(name, 1))
-                    for (name, val) in self.name2val.items()
-                },
-            )
-            if self.comm.rank != 0:
-                d["dummy"] = 1  # so we don't get a warning about empty dict
+        d = self.name2val
         out = d.copy()  # Return the dict for unit testing purposes
         for fmt in self.output_formats:
             if isinstance(fmt, KVWriter):
@@ -357,9 +340,6 @@ class Logger(object):
     def set_level(self, level):
         self.level = level
 
-    def set_comm(self, comm):
-        self.comm = comm
-
     def get_dir(self):
         return self.dir
 
@@ -375,41 +355,7 @@ class Logger(object):
                 fmt.writeseq(map(str, args))
 
 
-def get_rank_without_mpi_import():
-    # check environment variables here instead of importing mpi4py
-    # to avoid calling MPI_Init() when this module is imported
-    for varname in ["PMI_RANK", "OMPI_COMM_WORLD_RANK"]:
-        if varname in os.environ:
-            return int(os.environ[varname])
-    return 0
-
-
-def mpi_weighted_mean(comm, local_name2valcount):
-
-    all_name2valcount = comm.gather(local_name2valcount)
-    if comm.rank == 0:
-        name2sum = defaultdict(float)
-        name2count = defaultdict(float)
-        for n2vc in all_name2valcount:
-            for (name, (val, count)) in n2vc.items():
-                try:
-                    val = float(val)
-                except ValueError:
-                    if comm.rank == 0:
-                        warnings.warn(
-                            "WARNING: tried to compute mean on non-float {}={}".format(
-                                name, val
-                            )
-                        )
-                else:
-                    name2sum[name] += val * count
-                    name2count[name] += count
-        return {name: name2sum[name] / name2count[name] for name in name2sum}
-    else:
-        return {}
-
-
-def configure(dir=None, format_strs=None, comm=None, log_suffix=""):
+def configure(dir=None, format_strs=None, log_suffix=""):
 
     if dir is None:
         dir = os.getenv("OPENAI_LOGDIR")
@@ -422,7 +368,7 @@ def configure(dir=None, format_strs=None, comm=None, log_suffix=""):
     dir = os.path.expanduser(dir)
     os.makedirs(os.path.expanduser(dir), exist_ok=True)
 
-    rank = get_rank_without_mpi_import()
+    rank = int(os.environ.get("RANK", "0"))
     if rank > 0:
         log_suffix = log_suffix + "-rank%03i" % rank
 
@@ -430,11 +376,11 @@ def configure(dir=None, format_strs=None, comm=None, log_suffix=""):
         if rank == 0:
             format_strs = os.getenv("OPENAI_LOG_FORMAT", "stdout,log,csv").split(",")
         else:
-            format_strs = os.getenv("OPENAI_LOG_FORMAT_MPI", "log").split(",")
+            format_strs = os.getenv("OPENAI_LOG_FORMAT_WORKER", "log").split(",")
     format_strs = filter(None, format_strs)
     output_formats = [make_output_format(f, dir, log_suffix) for f in format_strs]
 
-    Logger.CURRENT = Logger(dir=dir, output_formats=output_formats, comm=comm)
+    Logger.CURRENT = Logger(dir=dir, output_formats=output_formats)
     if output_formats:
         log("Logging to %s" % dir)
 
@@ -452,9 +398,9 @@ def reset():
 
 
 @contextmanager
-def scoped_configure(dir=None, format_strs=None, comm=None):
+def scoped_configure(dir=None, format_strs=None):
     prevlogger = Logger.CURRENT
-    configure(dir=dir, format_strs=format_strs, comm=comm)
+    configure(dir=dir, format_strs=format_strs)
     try:
         yield
     finally:
